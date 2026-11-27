@@ -1,0 +1,60 @@
+name: Deploy to Cloudflare
+
+# Deploys the Worker after CI on main goes green, so lint, typecheck, tests, and
+# both deployment builds must pass before anything reaches production.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seeder-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Only push-to-main runs deploy: pull requests build and test, but never ship.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Require Cloudflare credentials
+        env:
+          API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$API_TOKEN" ] || [ -z "$ACCOUNT_ID" ]; then
+            echo 'Set CLOUDFLARE_API_TOKEN secret and CLOUDFLARE_ACCOUNT_ID secret.' >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build Cloudflare Worker
+        run: npx opennextjs-cloudflare build
+
+      # Applies pending D1 migrations, then deploys. --keep-vars keeps the
+      # Worker's existing vars and secrets, which live in Cloudflare only.
+      - name: Migrate and deploy
+        run: npm run deploy:ci
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
